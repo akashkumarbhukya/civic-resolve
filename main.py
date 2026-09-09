@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from database import init_db
-from whatsapp_api import send_category_menu, send_property_type_menu, send_text_message, send_location_request, send_worker_type_menu, send_trade_skill_menu
+from whatsapp_api import send_category_menu, send_property_type_menu, send_text_message, send_location_request, send_trade_skill_menu
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -181,8 +181,10 @@ async def receive_whatsapp_message(request: Request):
             sender_phone = message_data['from']
             message_type = message_data['type']
             
-            # Fetch user session if it exists, or create a blank one
-            session = user_sessions.get(sender_phone, {})
+            # Safely initialize session memory so it doesn't crash between messages
+            if sender_phone not in user_sessions:
+                user_sessions[sender_phone] = {}
+            session = user_sessions[sender_phone]
             
             # --- 1. HANDLE TEXT MESSAGES ---
             if message_type == 'text':
@@ -193,14 +195,18 @@ async def receive_whatsapp_message(request: Request):
                     send_category_menu(sender_phone)
                     
                 elif text_received == "JOIN":
-                    user_sessions[sender_phone] = {"step": "worker_type_selection"}
-                    send_worker_type_menu(sender_phone)
+                    # SKIP the Govt/Private menu! Default to Private Tech and immediately ask for skills.
+                    user_sessions[sender_phone] = {
+                        "step": "trade_skill_selection",
+                        "worker_type": "PRIVATE_TECH"
+                    }
+                    send_trade_skill_menu(sender_phone)
                     
                 # Handle Pincode input during worker registration
                 elif session.get("step") == "awaiting_pincode":
                     user_sessions[sender_phone]["pincode"] = text_received
                     user_sessions[sender_phone]["step"] = "awaiting_id_photo"
-                    send_text_message(sender_phone, "📸 Please upload a photo of your Government ID (Aadhar/PAN) or Trade License for verification.")
+                    send_text_message(sender_phone, "📸 Please upload a photo of your Government ID (PAN/Trade License) for verification.")
                     
             # --- 2. HANDLE INTERACTIVE BUTTONS/LISTS ---
             elif message_type == 'interactive':
@@ -227,11 +233,6 @@ async def receive_whatsapp_message(request: Request):
                     if selected_id in ["PROP_PUBLIC", "PROP_PRIVATE"]:
                         user_sessions[sender_phone]["step"] = "awaiting_issue_photo"
                         send_text_message(sender_phone, "📸 Please upload a clear photo of the issue so we can assess the damage.")
-                        
-                    # Worker Type Selection
-                    elif selected_id in ["WORKER_GOVT", "WORKER_PRIVATE"]:
-                        user_sessions[sender_phone]["worker_type"] = "GOVT" if selected_id == "WORKER_GOVT" else "PRIVATE_TECH"
-                        send_trade_skill_menu(sender_phone)
 
             # --- 3. HANDLE PHOTO UPLOADS ---
             elif message_type == 'image':
@@ -276,5 +277,7 @@ async def receive_whatsapp_message(request: Request):
 
         return {"status": "success"}
     except Exception as e:
+        import traceback
         print(f"Webhook error: {e}")
+        traceback.print_exc()
         return {"status": "error"}
