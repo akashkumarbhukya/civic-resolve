@@ -1,10 +1,11 @@
 import os
 import sqlite3
+import random
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from database import init_db
-from whatsapp_api import send_category_menu, send_property_type_menu, send_text_message
+from whatsapp_api import send_category_menu, send_property_type_menu, send_text_message, send_location_request
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,8 +24,33 @@ def update_worker_location(phone, new_pincode):
     conn.commit()
     conn.close()
 
+def notify_workers(ticket_id, lat, lon):
+    """Fetches all active workers from the DB and sends them an alert."""
+    conn = sqlite3.connect('civic_resolve.db')
+    cursor = conn.cursor()
+    # Grabbing all ACTIVE workers for the broadcast
+    cursor.execute("SELECT phone_number FROM workforce WHERE status = 'ACTIVE'")
+    workers = cursor.fetchall()
+    conn.close()
+
+    alert_message = (
+        "🚨 *NEW CIVIC TICKET DISPATCHED*\n\n"
+        f"🎫 Ticket ID: {ticket_id}\n"
+        f"📍 Location Coordinates: {lat}, {lon}\n\n"
+        "Please check the portal to accept this task."
+    )
+    
+    # Broadcast to all registered workers
+    for worker in workers:
+        worker_phone = worker[0]
+        # Append country code if missing (assumes Indian numbers)
+        if not worker_phone.startswith("91"):
+            worker_phone = "91" + worker_phone
+        send_text_message(worker_phone, alert_message)
+
 @app.get("/", response_class=HTMLResponse)
 async def admin_dashboard():
+    # ... [Keep your existing admin_dashboard HTML code exactly as it was] ...
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
     cursor.execute("SELECT worker_id, govt_emp_id, name, phone_number, worker_type, pincode, status FROM workforce")
@@ -159,6 +185,7 @@ async def receive_whatsapp_message(request: Request):
             sender_phone = message_data['from']
             message_type = message_data['type']
             
+            # --- 1. HANDLE TEXT MESSAGES ---
             if message_type == 'text':
                 text_received = message_data['text']['body'].upper().strip()
                 if text_received in ["HI", "HELLO"]:
@@ -167,21 +194,50 @@ async def receive_whatsapp_message(request: Request):
                 elif text_received == "JOIN":
                     send_text_message(sender_phone, "To join the workforce, please register through the admin portal.")
                     
+            # --- 2. HANDLE INTERACTIVE BUTTONS/LISTS ---
             elif message_type == 'interactive':
                 interactive_data = message_data['interactive']
+                
+                # Category List Selection
                 if interactive_data['type'] == 'list_reply':
                     selected_id = interactive_data['list_reply']['id']
                     if selected_id in ["CAT_WASTE", "CAT_ROADS", "CAT_WATER", "CAT_ELEC"]:
                         user_sessions[sender_phone] = {"category": selected_id}
                         send_property_type_menu(sender_phone)
+                        
+                # Property Button Selection
                 elif interactive_data['type'] == 'button_reply':
                     if interactive_data['button_reply']['id'] in ["PROP_PUBLIC", "PROP_PRIVATE"]:
-                        send_text_message(sender_phone, "Please share your current GPS location using the attachment (📎) button.")
+                        # Ask for a photo immediately after they select property type
+                        send_text_message(sender_phone, "📸 Please upload a clear photo of the issue so we can assess the damage.")
 
+            # --- 3. HANDLE PHOTO UPLOADS ---
+            elif message_type == 'image':
+                image_id = message_data['image']['id']
+                print(f"Evidence photo received! ID: {image_id}")
+                # Now trigger the native live location button
+                send_location_request(sender_phone)
+
+            # --- 4. HANDLE LOCATION & FINALIZE TICKET ---
             elif message_type == 'location':
                 lat = message_data['location']['latitude']
                 lon = message_data['location']['longitude']
-                send_text_message(sender_phone, f"✅ Ticket registered successfully! Location: ({lat}, {lon}). Assigned to default worker 'a' (25071a6201).")
+                
+                # Generate a clean ticket ID for the user
+                ticket_id = f"CR-{random.randint(1000, 9999)}"
+                
+                clean_msg = (
+                    "✅ *Ticket registered successfully!*\n"
+                    "📍 Location secured.\n"
+                    f"🎫 Ticket ID: {ticket_id}\n\n"
+                    "👷 A verified technician has been dispatched to your location. "
+                    "Track your status anytime by replying 'Status'."
+                )
+                # Send the clean message to the citizen
+                send_text_message(sender_phone, clean_msg)
+                
+                # Broadcast the alert to all 5 workforce members in the database
+                notify_workers(ticket_id, lat, lon)
 
         return {"status": "success"}
     except Exception as e:

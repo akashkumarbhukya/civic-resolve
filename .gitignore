@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables (Never upload your tokens!)
+.env
+
+# Database files
+*.db
+*.sqlite3
+civic_resolve.db
+
+# Virtual environments
+venv/
+env/

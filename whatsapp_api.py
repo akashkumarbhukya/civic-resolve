@@ -54,8 +54,7 @@ def send_category_menu(recipient_phone: str):
             }
         }
     }
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
-    return response.json()
+    requests.post(url, headers=headers, data=json.dumps(payload))
 
 def send_property_type_menu(recipient_phone: str):
     url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
@@ -79,5 +78,27 @@ def send_property_type_menu(recipient_phone: str):
             }
         }
     }
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
-    return response.json()
+    requests.post(url, headers=headers, data=json.dumps(payload))
+
+def send_location_request(recipient_phone: str):
+    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "type": "interactive",
+        "to": recipient_phone,
+        "interactive": {
+            "type": "location_request_message",
+            "body": {
+                "text": "📸 Photo received! Now, please tap the button below to securely share the exact GPS location of the issue."
+            },
+            "action": {
+                "name": "send_location"
+            }
+        }
+    }
+    requests.post(url, headers=headers, data=json.dumps(payload))
