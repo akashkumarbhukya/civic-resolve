@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import random
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -181,46 +182,56 @@ async def receive_whatsapp_message(request: Request):
             sender_phone = message_data['from']
             message_type = message_data['type']
             
-            # Safely initialize session memory so it doesn't crash between messages
+            # --- 1. TIMEOUT LOGIC (5 Minutes = 300 Seconds) ---
+            current_time = time.time()
+            
+            if sender_phone in user_sessions:
+                last_activity = user_sessions[sender_phone].get("last_activity", current_time)
+                # If more than 5 minutes have passed since their last message
+                if current_time - last_activity > 300:
+                    send_text_message(sender_phone, "⏳ Your previous session timed out due to inactivity. Please reply with 'Hi' to report an issue or 'Join' to register.")
+                    user_sessions.pop(sender_phone, None) # Clear the stuck memory
+            
+            # Safely initialize session memory
             if sender_phone not in user_sessions:
                 user_sessions[sender_phone] = {}
             session = user_sessions[sender_phone]
             
-            # --- 1. HANDLE TEXT MESSAGES ---
+            # Log the current time for this interaction
+            session["last_activity"] = current_time
+            
+            # --- 2. HANDLE TEXT MESSAGES ---
             if message_type == 'text':
                 text_received = message_data['text']['body'].upper().strip()
                 
                 if text_received in ["HI", "HELLO"]:
-                    user_sessions[sender_phone] = {"step": "category_selection"}
+                    user_sessions[sender_phone] = {"step": "category_selection", "last_activity": current_time}
                     send_category_menu(sender_phone)
                     
                 elif text_received == "JOIN":
-                    # SKIP the Govt/Private menu! Default to Private Tech and immediately ask for skills.
                     user_sessions[sender_phone] = {
                         "step": "trade_skill_selection",
-                        "worker_type": "PRIVATE_TECH"
+                        "worker_type": "PRIVATE_TECH",
+                        "last_activity": current_time
                     }
                     send_trade_skill_menu(sender_phone)
                     
-                # Handle Pincode input during worker registration
                 elif session.get("step") == "awaiting_pincode":
                     user_sessions[sender_phone]["pincode"] = text_received
                     user_sessions[sender_phone]["step"] = "awaiting_id_photo"
                     send_text_message(sender_phone, "📸 Please upload a photo of your Government ID (PAN/Trade License) for verification.")
                     
-            # --- 2. HANDLE INTERACTIVE BUTTONS/LISTS ---
+            # --- 3. HANDLE INTERACTIVE BUTTONS/LISTS ---
             elif message_type == 'interactive':
                 interactive_data = message_data['interactive']
                 
                 if interactive_data['type'] == 'list_reply':
                     selected_id = interactive_data['list_reply']['id']
                     
-                    # Citizen Category Selection
                     if selected_id in ["CAT_WASTE", "CAT_ROADS", "CAT_WATER", "CAT_ELEC"]:
                         user_sessions[sender_phone]["category"] = selected_id
                         send_property_type_menu(sender_phone)
                         
-                    # Worker Trade Skill Selection
                     elif selected_id in ["SKILL_ELEC", "SKILL_PLUMB", "SKILL_ROADS", "SKILL_WASTE"]:
                         user_sessions[sender_phone]["trade_skill"] = selected_id
                         user_sessions[sender_phone]["step"] = "awaiting_pincode"
@@ -229,18 +240,15 @@ async def receive_whatsapp_message(request: Request):
                 elif interactive_data['type'] == 'button_reply':
                     selected_id = interactive_data['button_reply']['id']
                     
-                    # Citizen Property Selection
                     if selected_id in ["PROP_PUBLIC", "PROP_PRIVATE"]:
                         user_sessions[sender_phone]["step"] = "awaiting_issue_photo"
                         send_text_message(sender_phone, "📸 Please upload a clear photo of the issue so we can assess the damage.")
 
-            # --- 3. HANDLE PHOTO UPLOADS ---
+            # --- 4. HANDLE PHOTO UPLOADS ---
             elif message_type == 'image':
-                # If Citizen is uploading an issue photo
                 if session.get("step") == "awaiting_issue_photo":
                     send_location_request(sender_phone)
                     
-                # If Worker is uploading ID proof
                 elif session.get("step") == "awaiting_id_photo":
                     worker_type = session.get("worker_type", "PRIVATE_TECH")
                     trade_skill = session.get("trade_skill", "GENERAL")
@@ -259,21 +267,23 @@ async def receive_whatsapp_message(request: Request):
                     send_text_message(sender_phone, f"✅ Registration complete! Your application is under review.\n🆔 Temporary ID: {worker_id}\n\nWe will notify you here once you are approved to receive local service requests.")
                     user_sessions.pop(sender_phone, None)
 
-            # --- 4. HANDLE LOCATION & FINALIZE CITIZEN TICKET ---
+            # --- 5. HANDLE LOCATION & FINALIZE CITIZEN TICKET ---
             elif message_type == 'location':
-                lat = message_data['location']['latitude']
-                lon = message_data['location']['longitude']
-                
-                ticket_id = f"CR-{random.randint(1000, 9999)}"
-                clean_msg = (
-                    "✅ *Ticket registered successfully!*\n"
-                    "📍 Location secured.\n"
-                    f"🎫 Ticket ID: {ticket_id}\n\n"
-                    "👷 A verified technician has been dispatched to your location. "
-                    "Track your status anytime by replying 'Status'."
-                )
-                send_text_message(sender_phone, clean_msg)
-                notify_workers(ticket_id, lat, lon)
+                if session.get("step") == "awaiting_issue_photo" or session.get("category"):
+                    lat = message_data['location']['latitude']
+                    lon = message_data['location']['longitude']
+                    
+                    ticket_id = f"CR-{random.randint(1000, 9999)}"
+                    clean_msg = (
+                        "✅ *Ticket registered successfully!*\n"
+                        "📍 Location secured.\n"
+                        f"🎫 Ticket ID: {ticket_id}\n\n"
+                        "👷 A verified technician has been dispatched to your location. "
+                        "Track your status anytime by replying 'Status'."
+                    )
+                    send_text_message(sender_phone, clean_msg)
+                    notify_workers(ticket_id, lat, lon)
+                    user_sessions.pop(sender_phone, None)
 
         return {"status": "success"}
     except Exception as e:
