@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from database import init_db
-from whatsapp_api import send_category_menu, send_property_type_menu, send_text_message, send_location_request
+from whatsapp_api import send_category_menu, send_property_type_menu, send_text_message, send_location_request, send_worker_type_menu, send_trade_skill_menu
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,7 +28,6 @@ def notify_workers(ticket_id, lat, lon):
     """Fetches all active workers from the DB and sends them an alert."""
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
-    # Grabbing all ACTIVE workers for the broadcast
     cursor.execute("SELECT phone_number FROM workforce WHERE status = 'ACTIVE'")
     workers = cursor.fetchall()
     conn.close()
@@ -40,17 +39,14 @@ def notify_workers(ticket_id, lat, lon):
         "Please check the portal to accept this task."
     )
     
-    # Broadcast to all registered workers
     for worker in workers:
         worker_phone = worker[0]
-        # Append country code if missing (assumes Indian numbers)
         if not worker_phone.startswith("91"):
             worker_phone = "91" + worker_phone
         send_text_message(worker_phone, alert_message)
 
 @app.get("/", response_class=HTMLResponse)
 async def admin_dashboard():
-    # ... [Keep your existing admin_dashboard HTML code exactly as it was] ...
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
     cursor.execute("SELECT worker_id, govt_emp_id, name, phone_number, worker_type, pincode, status FROM workforce")
@@ -185,47 +181,89 @@ async def receive_whatsapp_message(request: Request):
             sender_phone = message_data['from']
             message_type = message_data['type']
             
+            # Fetch user session if it exists, or create a blank one
+            session = user_sessions.get(sender_phone, {})
+            
             # --- 1. HANDLE TEXT MESSAGES ---
             if message_type == 'text':
                 text_received = message_data['text']['body'].upper().strip()
+                
                 if text_received in ["HI", "HELLO"]:
                     user_sessions[sender_phone] = {"step": "category_selection"}
                     send_category_menu(sender_phone)
+                    
                 elif text_received == "JOIN":
-                    send_text_message(sender_phone, "To join the workforce, please register through the admin portal.")
+                    user_sessions[sender_phone] = {"step": "worker_type_selection"}
+                    send_worker_type_menu(sender_phone)
+                    
+                # Handle Pincode input during worker registration
+                elif session.get("step") == "awaiting_pincode":
+                    user_sessions[sender_phone]["pincode"] = text_received
+                    user_sessions[sender_phone]["step"] = "awaiting_id_photo"
+                    send_text_message(sender_phone, "📸 Please upload a photo of your Government ID (Aadhar/PAN) or Trade License for verification.")
                     
             # --- 2. HANDLE INTERACTIVE BUTTONS/LISTS ---
             elif message_type == 'interactive':
                 interactive_data = message_data['interactive']
                 
-                # Category List Selection
                 if interactive_data['type'] == 'list_reply':
                     selected_id = interactive_data['list_reply']['id']
+                    
+                    # Citizen Category Selection
                     if selected_id in ["CAT_WASTE", "CAT_ROADS", "CAT_WATER", "CAT_ELEC"]:
-                        user_sessions[sender_phone] = {"category": selected_id}
+                        user_sessions[sender_phone]["category"] = selected_id
                         send_property_type_menu(sender_phone)
                         
-                # Property Button Selection
+                    # Worker Trade Skill Selection
+                    elif selected_id in ["SKILL_ELEC", "SKILL_PLUMB", "SKILL_ROADS", "SKILL_WASTE"]:
+                        user_sessions[sender_phone]["trade_skill"] = selected_id
+                        user_sessions[sender_phone]["step"] = "awaiting_pincode"
+                        send_text_message(sender_phone, "📍 Please reply with the 6-digit Pincode of your primary operating area (e.g., 506134).")
+                        
                 elif interactive_data['type'] == 'button_reply':
-                    if interactive_data['button_reply']['id'] in ["PROP_PUBLIC", "PROP_PRIVATE"]:
-                        # Ask for a photo immediately after they select property type
+                    selected_id = interactive_data['button_reply']['id']
+                    
+                    # Citizen Property Selection
+                    if selected_id in ["PROP_PUBLIC", "PROP_PRIVATE"]:
+                        user_sessions[sender_phone]["step"] = "awaiting_issue_photo"
                         send_text_message(sender_phone, "📸 Please upload a clear photo of the issue so we can assess the damage.")
+                        
+                    # Worker Type Selection
+                    elif selected_id in ["WORKER_GOVT", "WORKER_PRIVATE"]:
+                        user_sessions[sender_phone]["worker_type"] = "GOVT" if selected_id == "WORKER_GOVT" else "PRIVATE_TECH"
+                        send_trade_skill_menu(sender_phone)
 
             # --- 3. HANDLE PHOTO UPLOADS ---
             elif message_type == 'image':
-                image_id = message_data['image']['id']
-                print(f"Evidence photo received! ID: {image_id}")
-                # Now trigger the native live location button
-                send_location_request(sender_phone)
+                # If Citizen is uploading an issue photo
+                if session.get("step") == "awaiting_issue_photo":
+                    send_location_request(sender_phone)
+                    
+                # If Worker is uploading ID proof
+                elif session.get("step") == "awaiting_id_photo":
+                    worker_type = session.get("worker_type", "PRIVATE_TECH")
+                    trade_skill = session.get("trade_skill", "GENERAL")
+                    pincode = session.get("pincode", "000000")
+                    
+                    conn = sqlite3.connect('civic_resolve.db')
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                    INSERT OR IGNORE INTO workforce (phone_number, worker_type, trade_skill, pincode, status, name)
+                    VALUES (?, ?, ?, ?, 'PENDING_REVIEW', ?)
+                    ''', (sender_phone, worker_type, trade_skill, pincode, "New Applicant"))
+                    conn.commit()
+                    conn.close()
+                    
+                    worker_id = f"PT-{random.randint(1000, 9999)}"
+                    send_text_message(sender_phone, f"✅ Registration complete! Your application is under review.\n🆔 Temporary ID: {worker_id}\n\nWe will notify you here once you are approved to receive local service requests.")
+                    user_sessions.pop(sender_phone, None)
 
-            # --- 4. HANDLE LOCATION & FINALIZE TICKET ---
+            # --- 4. HANDLE LOCATION & FINALIZE CITIZEN TICKET ---
             elif message_type == 'location':
                 lat = message_data['location']['latitude']
                 lon = message_data['location']['longitude']
                 
-                # Generate a clean ticket ID for the user
                 ticket_id = f"CR-{random.randint(1000, 9999)}"
-                
                 clean_msg = (
                     "✅ *Ticket registered successfully!*\n"
                     "📍 Location secured.\n"
@@ -233,10 +271,7 @@ async def receive_whatsapp_message(request: Request):
                     "👷 A verified technician has been dispatched to your location. "
                     "Track your status anytime by replying 'Status'."
                 )
-                # Send the clean message to the citizen
                 send_text_message(sender_phone, clean_msg)
-                
-                # Broadcast the alert to all 5 workforce members in the database
                 notify_workers(ticket_id, lat, lon)
 
         return {"status": "success"}
