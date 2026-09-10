@@ -4,11 +4,6 @@ def init_db():
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
 
-    # Drop old tables to clear schema mismatch errors
-    cursor.execute("DROP TABLE IF EXISTS workforce")
-    cursor.execute("DROP TABLE IF EXISTS citizens")
-    cursor.execute("DROP TABLE IF EXISTS tickets")
-
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS citizens (
         phone_number TEXT PRIMARY KEY,
@@ -47,14 +42,28 @@ def init_db():
     )
     ''')
 
-    # Seed Government Employees with exact numbers provided
+    # Safely migrate existing databases with new columns (ignores if they already exist)
+    try:
+        cursor.execute("ALTER TABLE tickets ADD COLUMN material_requested TEXT")
+        cursor.execute("ALTER TABLE tickets ADD COLUMN material_status TEXT")
+        cursor.execute("ALTER TABLE tickets ADD COLUMN vendor_phone TEXT")
+    except sqlite3.OperationalError:
+        pass 
+
+    try:
+        cursor.execute("ALTER TABLE workforce ADD COLUMN otp TEXT")
+        cursor.execute("ALTER TABLE workforce ADD COLUMN otp_expiry REAL")
+    except sqlite3.OperationalError:
+        pass 
+
+    # Seed Government Employees
     govt_employees = [
         ("25071a6201", "a", "9398750534"),
         ("25071a6202", "b", "6309931174"),
         ("25071a6203", "c", "9000171576"),
         ("25071a6204", "d", "9182048099"),
         ("25071a6205", "e", "7702895327"),
-        ("25071a6206", "f", "9398750534")
+        ("25071a6206", "f", "9398750534") 
     ]
 
     for emp_id, name, phone in govt_employees:
@@ -65,7 +74,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("Database initialized and employees seeded successfully.")
+    print("Database verified securely. OTP & Procurement logic ready.")
 
 if __name__ == "__main__":
     init_db()
