@@ -29,7 +29,7 @@ def notify_workers(ticket_id, lat, lon):
     """Fetches all active workers from the DB and sends them an alert."""
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT phone_number FROM workforce WHERE status = 'ACTIVE'")
+    cursor.execute("SELECT phone_number FROM workforce WHERE status = 'ACTIVE' AND worker_type IN ('GOVT', 'PRIVATE_TECH')")
     workers = cursor.fetchall()
     conn.close()
 
@@ -37,7 +37,7 @@ def notify_workers(ticket_id, lat, lon):
         "🚨 *NEW CIVIC TICKET DISPATCHED*\n\n"
         f"🎫 Ticket ID: {ticket_id}\n"
         f"📍 Location Coordinates: {lat}, {lon}\n\n"
-        "Please check the portal to accept this task."
+        f"Reply *ACCEPT {ticket_id}* to claim this task."
     )
     
     for worker in workers:
@@ -45,6 +45,27 @@ def notify_workers(ticket_id, lat, lon):
         if not worker_phone.startswith("91"):
             worker_phone = "91" + worker_phone
         send_text_message(worker_phone, alert_message)
+
+def notify_vendors(item_name, tech_phone):
+    """Fetches all active vendors from the DB and sends them a material request."""
+    conn = sqlite3.connect('civic_resolve.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT phone_number FROM workforce WHERE worker_type = 'VENDOR' AND status = 'ACTIVE'")
+    vendors = cursor.fetchall()
+    conn.close()
+
+    alert_message = (
+        "🛒 *LOCAL MATERIAL REQUEST*\n\n"
+        f"🛠️ Item Needed: {item_name}\n"
+        f"📞 Tech Contact: {tech_phone}\n\n"
+        f"Reply *SUPPLY {item_name}* to accept this order."
+    )
+    
+    for vendor in vendors:
+        v_phone = vendor[0]
+        if not v_phone.startswith("91"):
+            v_phone = "91" + v_phone
+        send_text_message(v_phone, alert_message)
 
 @app.get("/", response_class=HTMLResponse)
 async def admin_dashboard():
@@ -182,32 +203,30 @@ async def receive_whatsapp_message(request: Request):
             sender_phone = message_data['from']
             message_type = message_data['type']
             
-            # --- 1. TIMEOUT LOGIC (5 Minutes = 300 Seconds) ---
+            # --- 1. TIMEOUT LOGIC ---
             current_time = time.time()
-            
             if sender_phone in user_sessions:
                 last_activity = user_sessions[sender_phone].get("last_activity", current_time)
-                # If more than 5 minutes have passed since their last message
+                # 5 Minutes Timeout
                 if current_time - last_activity > 300:
-                    send_text_message(sender_phone, "⏳ Your previous session timed out due to inactivity. Please reply with 'Hi' to report an issue or 'Join' to register.")
-                    user_sessions.pop(sender_phone, None) # Clear the stuck memory
+                    send_text_message(sender_phone, "⏳ Your previous session timed out. Please reply with 'Hi' to report an issue or 'Join' to register.")
+                    user_sessions.pop(sender_phone, None)
             
-            # Safely initialize session memory
             if sender_phone not in user_sessions:
                 user_sessions[sender_phone] = {}
             session = user_sessions[sender_phone]
-            
-            # Log the current time for this interaction
             session["last_activity"] = current_time
             
             # --- 2. HANDLE TEXT MESSAGES ---
             if message_type == 'text':
                 text_received = message_data['text']['body'].upper().strip()
                 
+                # Setup 
                 if text_received in ["HI", "HELLO"]:
                     user_sessions[sender_phone] = {"step": "category_selection", "last_activity": current_time}
                     send_category_menu(sender_phone)
                     
+                # Setup Worker
                 elif text_received == "JOIN":
                     user_sessions[sender_phone] = {
                         "step": "trade_skill_selection",
@@ -216,11 +235,54 @@ async def receive_whatsapp_message(request: Request):
                     }
                     send_trade_skill_menu(sender_phone)
                     
+                # STEP 6: Micro-Procurement
+                elif text_received.startswith("NEED "):
+                    item = text_received[5:].strip()
+                    notify_vendors(item, sender_phone)
+                    send_text_message(sender_phone, f"✅ Material request for '{item}' has been broadcasted to nearby shopkeepers!")
+                    
+                elif text_received.startswith("SUPPLY "):
+                    item = text_received[7:].strip()
+                    send_text_message(sender_phone, f"✅ Order Accepted! You are assigned to supply '{item}'. The tech will contact you.")
+                
+                # STEP 7: Resolution & Escalation
+                elif text_received.startswith("RESOLVED "):
+                    ticket_id = text_received[9:].strip().upper()
+                    
+                    conn = sqlite3.connect('civic_resolve.db')
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE tickets SET status = 'RESOLVED' WHERE ticket_id = ?", (ticket_id,))
+                    conn.commit()
+                    conn.close()
+                    
+                    user_sessions[sender_phone]["step"] = "awaiting_after_photo"
+                    user_sessions[sender_phone]["current_ticket"] = ticket_id
+                    send_text_message(sender_phone, f"✅ {ticket_id} marked as RESOLVED.\n\n📸 Please upload a clear 'After' photo of the fixed issue so we can verify the work and notify the citizen.")
+                    
+                elif text_received.startswith("ESCALATE "):
+                    ticket_id = text_received[9:].strip().upper()
+                    conn = sqlite3.connect('civic_resolve.db')
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE tickets SET status = 'ESCALATED' WHERE ticket_id = ?", (ticket_id,))
+                    conn.commit()
+                    conn.close()
+                    send_text_message(sender_phone, f"⚠️ {ticket_id} has been ESCALATED to the University/CSR portal.")
+                    
+                # Worker Registration 
                 elif session.get("step") == "awaiting_pincode":
                     user_sessions[sender_phone]["pincode"] = text_received
                     user_sessions[sender_phone]["step"] = "awaiting_id_photo"
                     send_text_message(sender_phone, "📸 Please upload a photo of your Government ID (PAN/Trade License) for verification.")
                     
+                # STEP 9: Handle Citizen Rating Input
+                elif session.get("step") == "awaiting_rating":
+                    if text_received in ["1", "2", "3", "4", "5"]:
+                        ticket_id = session.get("current_ticket", "")
+                        send_text_message(sender_phone, f"🙏 Thank you for your feedback! Your rating of {text_received}⭐ for ticket {ticket_id} has been recorded. Have a great day!")
+                        user_sessions.pop(sender_phone, None)
+                    else:
+                        send_text_message(sender_phone, "Please reply with a simple number from 1 to 5.")
+                        
             # --- 3. HANDLE INTERACTIVE BUTTONS/LISTS ---
             elif message_type == 'interactive':
                 interactive_data = message_data['interactive']
@@ -241,6 +303,8 @@ async def receive_whatsapp_message(request: Request):
                     selected_id = interactive_data['button_reply']['id']
                     
                     if selected_id in ["PROP_PUBLIC", "PROP_PRIVATE"]:
+                        # Save the property type choice so we can use it for payments later!
+                        user_sessions[sender_phone]["property_type"] = "PUBLIC" if selected_id == "PROP_PUBLIC" else "PRIVATE"
                         user_sessions[sender_phone]["step"] = "awaiting_issue_photo"
                         send_text_message(sender_phone, "📸 Please upload a clear photo of the issue so we can assess the damage.")
 
@@ -266,14 +330,66 @@ async def receive_whatsapp_message(request: Request):
                     worker_id = f"PT-{random.randint(1000, 9999)}"
                     send_text_message(sender_phone, f"✅ Registration complete! Your application is under review.\n🆔 Temporary ID: {worker_id}\n\nWe will notify you here once you are approved to receive local service requests.")
                     user_sessions.pop(sender_phone, None)
+                    
+                # STEP 8 & 9: Tech uploads After Photo -> Notify Citizen for Rating
+                elif session.get("step") == "awaiting_after_photo":
+                    ticket_id = session.get("current_ticket", "")
+                    
+                    # Thank the technician and clear their session
+                    send_text_message(sender_phone, f"🏆 'After' photo successfully saved for {ticket_id}!\nThe civic loop is now closed. Great work today!")
+                    user_sessions.pop(sender_phone, None)
+                    
+                    # Fetch citizen details to ask for feedback and explain payment
+                    conn = sqlite3.connect('civic_resolve.db')
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT citizen_phone, property_type FROM tickets WHERE ticket_id = ?", (ticket_id,))
+                    ticket_info = cursor.fetchone()
+                    conn.close()
+                    
+                    if ticket_info:
+                        citizen_phone = ticket_info[0]
+                        property_type = ticket_info[1]
+                        
+                        msg_to_citizen = f"✅ *TICKET RESOLVED: {ticket_id}*\n\nYour reported issue has been fixed! The technician has uploaded the final photo."
+                        
+                        # Apply payment logic based on property type
+                        if property_type == "PRIVATE":
+                            msg_to_citizen += "\n\n💳 *Payment Info:* Since this was on Private Property, please coordinate payment directly with the technician. We do not interfere with private service negotiations."
+                        else:
+                            msg_to_citizen += "\n\n🏛️ *Payment Info:* This was a Public Infrastructure fix covered by municipal services. No payment is required!"
+                            
+                        msg_to_citizen += "\n\n⭐ *Feedback:* Please reply to this message with a number from 1 to 5 to rate the service (5 being excellent)."
+                        
+                        # Send to citizen
+                        send_text_message(citizen_phone, msg_to_citizen)
+                        
+                        # Put the citizen in the rating step
+                        if citizen_phone not in user_sessions:
+                            user_sessions[citizen_phone] = {}
+                        user_sessions[citizen_phone]["step"] = "awaiting_rating"
+                        user_sessions[citizen_phone]["current_ticket"] = ticket_id
+                        user_sessions[citizen_phone]["last_activity"] = time.time()
 
             # --- 5. HANDLE LOCATION & FINALIZE CITIZEN TICKET ---
             elif message_type == 'location':
                 if session.get("step") == "awaiting_issue_photo" or session.get("category"):
                     lat = message_data['location']['latitude']
                     lon = message_data['location']['longitude']
+                    category = session.get("category", "GENERAL")
+                    property_type = session.get("property_type", "PUBLIC")
                     
                     ticket_id = f"CR-{random.randint(1000, 9999)}"
+                    
+                    # Save the new ticket to the database so we can reference it later!
+                    conn = sqlite3.connect('civic_resolve.db')
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                    INSERT INTO tickets (ticket_id, citizen_phone, category, property_type, latitude, longitude, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
+                    ''', (ticket_id, sender_phone, category, property_type, str(lat), str(lon)))
+                    conn.commit()
+                    conn.close()
+                    
                     clean_msg = (
                         "✅ *Ticket registered successfully!*\n"
                         "📍 Location secured.\n"

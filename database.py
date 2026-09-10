@@ -54,7 +54,7 @@ def init_db():
         ("25071a6203", "c", "9000171576"),
         ("25071a6204", "d", "9182048099"),
         ("25071a6205", "e", "7702895327"),
-        ("25071a6206", "f", "9398750534")  # Using available seed pool for f
+        ("25071a6206", "f", "9398750534")
     ]
 
     for emp_id, name, phone in govt_employees:

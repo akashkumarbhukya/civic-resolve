@@ -103,30 +103,6 @@ def send_location_request(recipient_phone: str):
     }
     requests.post(url, headers=headers, data=json.dumps(payload))
 
-def send_worker_type_menu(recipient_phone: str):
-    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": recipient_phone,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": "Welcome to the Civic Resolve Workforce! Are you registering as a Government Official or an Independent Private Technician?"},
-            "action": {
-                "buttons": [
-                    {"type": "reply", "reply": {"id": "WORKER_GOVT", "title": "Govt Official"}},
-                    {"type": "reply", "reply": {"id": "WORKER_PRIVATE", "title": "Private Technician"}}
-                ]
-            }
-        }
-    }
-    requests.post(url, headers=headers, data=json.dumps(payload))
-
 def send_trade_skill_menu(recipient_phone: str):
     url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
     headers = {
