@@ -25,7 +25,6 @@ async def session_timeout_checker():
         current_time = time.time()
         expired_users = []
         
-        # Safely iterate over a list of items to avoid dict changing size
         for phone, session in list(user_sessions.items()):
             if current_time - session.get("last_activity", current_time) > 300: # 5 Minutes
                 expired_users.append(phone)
@@ -37,10 +36,9 @@ async def session_timeout_checker():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Start the proactive timeout checker when the server boots
     task = asyncio.create_task(session_timeout_checker())
     yield
-    task.cancel() # Stop the task if the server shuts down
+    task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -67,67 +65,171 @@ def broadcast_to_vendors(ticket_id, item_name, tech_phone):
         if not v_phone.startswith("91"): v_phone = "91" + v_phone
         send_vendor_alert(v_phone, ticket_id, item_name, tech_phone)
 
-# --- ADMIN DASHBOARD ---
+# --- NEW SMART CITY ADMIN DASHBOARD ---
 @app.get("/", response_class=HTMLResponse)
 async def admin_dashboard():
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
-    # Sorts the database so identical Pincodes are grouped together!
-    cursor.execute("SELECT worker_id, govt_emp_id, name, phone_number, worker_type, pincode, status FROM workforce ORDER BY pincode ASC, worker_type ASC")
-    workers = cursor.fetchall()
+    
+    # 1. Fetch Stats
+    cursor.execute("SELECT COUNT(*) FROM tickets")
+    complaints_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM workforce WHERE worker_type IN ('GOVT', 'PRIVATE_TECH')")
+    techs_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM workforce WHERE worker_type = 'VENDOR'")
+    suppliers_count = cursor.fetchone()[0]
+    
+    # 2. Fetch Data Arrays
+    cursor.execute("SELECT worker_id, govt_emp_id, name, phone_number, worker_type, trade_skill, pincode, status FROM workforce WHERE worker_type IN ('GOVT', 'PRIVATE_TECH') ORDER BY pincode ASC")
+    technicians = cursor.fetchall()
+    
+    cursor.execute("SELECT worker_id, name, phone_number, trade_skill, pincode, status FROM workforce WHERE worker_type = 'VENDOR' ORDER BY pincode ASC")
+    suppliers = cursor.fetchall()
+    
+    cursor.execute("SELECT ticket_id, category, property_type, latitude, longitude, status, assigned_worker_phone, vendor_phone, material_status FROM tickets ORDER BY created_at DESC")
+    tickets = cursor.fetchall()
+    
     conn.close()
 
-    html_content = """
+    # --- HTML UI RENDER ---
+    html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Civic Resolve - Admin Dashboard</title>
+        <title>Civic Resolve - Smart City Dashboard</title>
         <style>
-            body { font-family: Arial, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; }
-            h2, h3 { color: #333; }
-            table { width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 30px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-            th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
-            th { background: #007bff; color: white; }
-            form { background: #fff; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); max-width: 600px; }
-            input, select { width: 100%; padding: 8px; margin: 8px 0 15px 0; display: inline-block; border: 1px solid #ccc; box-sizing: border-box; }
-            button { background: #28a745; color: white; padding: 10px 15px; border: none; cursor: pointer; width: 100%; }
-            button:hover { background: #218838; }
-            .update-btn { background: #ffc107; color: black; padding: 5px 10px; width: auto; margin-right: 5px; }
-            .update-btn:hover { background: #e0a800; }
-            .delete-btn { background: #dc3545; padding: 5px 10px; width: auto; }
-            .delete-btn:hover { background: #c82333; }
-            .inline-input { width: 110px; padding: 5px; margin: 0; }
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; margin: 0; padding: 30px; color: #333; }}
+            h2 {{ color: #1a1a1a; margin-bottom: 20px; font-size: 28px; border-bottom: 2px solid #007bff; padding-bottom: 10px; display: inline-block; }}
+            h3 {{ color: #444; margin-top: 40px; font-size: 22px; }}
+            
+            /* Stats Cards */
+            .stats-row {{ display: flex; gap: 20px; margin-bottom: 40px; }}
+            .stat-card {{ background: #fff; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); flex: 1; text-align: center; border-top: 4px solid #007bff; }}
+            .stat-card.tech {{ border-color: #28a745; }}
+            .stat-card.vendor {{ border-color: #f59f00; }}
+            .stat-card h4 {{ margin: 0; color: #666; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }}
+            .stat-card h1 {{ margin: 10px 0 0 0; color: #222; font-size: 42px; }}
+            
+            /* Tables */
+            table {{ width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 20px; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+            th, td {{ padding: 15px; border-bottom: 1px solid #eee; text-align: left; }}
+            th {{ background: #f8f9fa; color: #333; font-weight: 600; }}
+            tr:hover {{ background: #fcfcfc; }}
+            
+            /* Badges */
+            .badge {{ padding: 5px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; color: white; }}
+            .bg-open {{ background: #dc3545; }}
+            .bg-assigned {{ background: #f59f00; }}
+            .bg-resolved {{ background: #28a745; }}
+            .bg-public {{ background: #17a2b8; }}
+            .bg-private {{ background: #6c757d; }}
+            
+            /* Forms & Buttons */
+            form {{ margin: 0; }}
+            .inline-input {{ width: 110px; padding: 8px; margin: 0; border: 1px solid #ddd; border-radius: 4px; }}
+            button {{ padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s; }}
+            .update-btn {{ background: #f59f00; color: white; margin-right: 5px; }}
+            .update-btn:hover {{ background: #e09000; }}
+            .delete-btn {{ background: #dc3545; color: white; }}
+            .delete-btn:hover {{ background: #c82333; }}
+            
+            .add-form {{ background: #fff; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 800px; }}
+            .add-form label {{ font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; }}
+            .add-form input, .add-form select {{ width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }}
+            .add-form button {{ background: #007bff; color: white; padding: 12px; width: 100%; margin-top: 20px; font-size: 16px; }}
+            .add-form button:hover {{ background: #0056b3; }}
+            
+            a.map-link {{ color: #007bff; text-decoration: none; font-weight: bold; }}
+            a.map-link:hover {{ text-decoration: underline; }}
         </style>
     </head>
     <body>
-        <h2>🏛️ Civic Resolve - Official Workforce Admin Panel</h2>
+        <h2>🏛️ Civic Resolve Command Center</h2>
         
-        <h3>Current Workforce Directory (Grouped by Pincode)</h3>
+        <div class="stats-row">
+            <div class="stat-card">
+                <h4>Total Complaints</h4>
+                <h1>{complaints_count}</h1>
+            </div>
+            <div class="stat-card tech">
+                <h4>Registered Technicians</h4>
+                <h1>{techs_count}</h1>
+            </div>
+            <div class="stat-card vendor">
+                <h4>Local Suppliers</h4>
+                <h1>{suppliers_count}</h1>
+            </div>
+        </div>
+
+        <!-- COMPLAINTS TABLE -->
+        <h3>📢 Live Incidents & Complaints</h3>
+        <table>
+            <tr>
+                <th>Ticket ID</th>
+                <th>Category</th>
+                <th>Type</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th>Assigned Tech</th>
+                <th>Supplier Status</th>
+                <th>Evidence</th>
+            </tr>
+    """
+    for t in tickets:
+        status_color = "bg-resolved" if t[5] == "RESOLVED" else ("bg-assigned" if t[5] == "ASSIGNED" else "bg-open")
+        type_color = "bg-public" if t[2] == "PUBLIC" else "bg-private"
+        map_link = f"https://maps.google.com/?q={t[3]},{t[4]}" if t[3] and t[4] else "#"
+        
+        tech_phone = f"+{t[6]}" if t[6] else "<i>Unassigned</i>"
+        vendor_info = f"Vendor +{t[7]} ({t[8]})" if t[7] else "<i>None Required</i>"
+        
+        html_content += f"""
+            <tr>
+                <td><strong>{t[0]}</strong></td>
+                <td>{t[1].replace('CAT_', '')}</td>
+                <td><span class="badge {type_color}">{t[2]}</span></td>
+                <td><a href="{map_link}" target="_blank" class="map-link">📍 View Map</a></td>
+                <td><span class="badge {status_color}">{t[5]}</span></td>
+                <td>{tech_phone}</td>
+                <td>{vendor_info}</td>
+                <td>📸 <i>In App</i></td>
+            </tr>
+        """
+        
+    html_content += """
+        </table>
+
+        <!-- TECHNICIANS TABLE -->
+        <h3>👷 Technicians Directory</h3>
         <table>
             <tr>
                 <th>ID / Emp ID</th>
                 <th>Name</th>
                 <th>Phone Number (Edit)</th>
                 <th>Type</th>
+                <th>Trade / Skill</th>
                 <th>Pincode (Edit)</th>
                 <th>Status</th>
                 <th>Actions</th>
             </tr>
     """
-    for w in workers:
+    for w in technicians:
         html_content += f"""
             <tr>
                 <td>{w[0]} ({w[1] if w[1] else 'N/A'})</td>
                 <td>{w[2]}</td>
-                <form action="/admin/update/{w[0]}" method="post" style="padding:0; box-shadow:none; margin:0; background:transparent;">
+                <form action="/admin/update/{w[0]}" method="post">
                     <td><input type="text" name="phone_number" value="{w[3]}" class="inline-input"></td>
                     <td>{w[4]}</td>
-                    <td><input type="text" name="pincode" value="{w[5]}" class="inline-input"></td>
-                    <td>{w[6]}</td>
+                    <td><strong>{w[5].replace('SKILL_', '')}</strong></td>
+                    <td><input type="text" name="pincode" value="{w[6]}" class="inline-input"></td>
+                    <td>{w[7]}</td>
                     <td>
                         <button type="submit" class="update-btn">Update</button>
                 </form>
-                <form action="/admin/delete/{w[0]}" method="post" style="display:inline; padding:0; box-shadow:none; margin:0; background:transparent;">
+                <form action="/admin/delete/{w[0]}" method="post" style="display:inline;">
                     <button type="submit" class="delete-btn">Delete</button>
                 </form>
                     </td>
@@ -137,24 +239,77 @@ async def admin_dashboard():
     html_content += """
         </table>
 
-        <h3>Add New Worker</h3>
-        <form action="/admin/add" method="post">
-            <label>Name:</label>
-            <input type="text" name="name" required>
-            <label>Phone Number:</label>
-            <input type="text" name="phone_number" required>
-            <label>Worker Type:</label>
-            <select name="worker_type">
-                <option value="GOVT">GOVT</option>
-                <option value="PRIVATE_TECH">PRIVATE_TECH</option>
-                <option value="VENDOR">VENDOR</option>
-            </select>
-            <label>Govt Emp ID (Optional):</label>
-            <input type="text" name="govt_emp_id">
-            <label>Pincode:</label>
-            <input type="text" name="pincode" value="506134" required>
-            <button type="submit">Add Worker</button>
-        </form>
+        <!-- SUPPLIERS TABLE -->
+        <h3>🏪 Suppliers Directory</h3>
+        <table>
+            <tr>
+                <th>ID</th>
+                <th>Shop Name</th>
+                <th>Phone Number (Edit)</th>
+                <th>Supply Category</th>
+                <th>Pincode (Edit)</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+    """
+    for s in suppliers:
+        html_content += f"""
+            <tr>
+                <td>{s[0]}</td>
+                <td>{s[1]}</td>
+                <form action="/admin/update/{s[0]}" method="post">
+                    <td><input type="text" name="phone_number" value="{s[2]}" class="inline-input"></td>
+                    <td><strong>{s[3]}</strong></td>
+                    <td><input type="text" name="pincode" value="{s[4]}" class="inline-input"></td>
+                    <td>{s[5]}</td>
+                    <td>
+                        <button type="submit" class="update-btn">Update</button>
+                </form>
+                <form action="/admin/delete/{s[0]}" method="post" style="display:inline;">
+                    <button type="submit" class="delete-btn">Delete</button>
+                </form>
+                    </td>
+            </tr>
+        """
+
+    html_content += """
+        </table>
+
+        <!-- ADD TECHNICIAN FORM -->
+        <h3>➕ Add New Technician</h3>
+        <div class="add-form">
+            <form action="/admin/add" method="post">
+                <label>Worker Name:</label>
+                <input type="text" name="name" required placeholder="Enter full name">
+                
+                <label>Phone Number (Include Country Code, e.g., 919876543210):</label>
+                <input type="text" name="phone_number" required placeholder="919876543210">
+                
+                <label>Worker Type:</label>
+                <select name="worker_type">
+                    <option value="GOVT">Government Official (Can approve OTPs)</option>
+                    <option value="PRIVATE_TECH">Private Technician</option>
+                </select>
+
+                <label>Trade Skill:</label>
+                <select name="trade_skill">
+                    <option value="GENERAL_CIVIC">General Civic Duties</option>
+                    <option value="SKILL_ELEC">Electrician</option>
+                    <option value="SKILL_PLUMB">Plumber / Water Works</option>
+                    <option value="SKILL_ROADS">Mason / Roadworks</option>
+                    <option value="SKILL_WASTE">Waste Management</option>
+                </select>
+                
+                <label>Govt Employee ID (Optional, leave blank if Private):</label>
+                <input type="text" name="govt_emp_id" placeholder="e.g., EMP-101">
+                
+                <label>Operating Pincode:</label>
+                <input type="text" name="pincode" value="506134" required>
+                
+                <button type="submit">Register Technician to Workforce</button>
+            </form>
+        </div>
+        <br><br>
     </body>
     </html>
     """
@@ -170,13 +325,13 @@ async def update_worker(worker_id: int, phone_number: str = Form(...), pincode: 
     return RedirectResponse(url="/", status_code=303)
 
 @app.post("/admin/add")
-async def add_worker(name: str = Form(...), phone_number: str = Form(...), worker_type: str = Form(...), govt_emp_id: str = Form(None), pincode: str = Form(...)):
+async def add_worker(name: str = Form(...), phone_number: str = Form(...), worker_type: str = Form(...), trade_skill: str = Form(...), govt_emp_id: str = Form(None), pincode: str = Form(...)):
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
     cursor.execute('''
     INSERT INTO workforce (phone_number, worker_type, trade_skill, pincode, status, govt_emp_id, name)
-    VALUES (?, ?, 'GENERAL_CIVIC', ?, 'ACTIVE', ?, ?)
-    ''', (phone_number, worker_type, pincode, govt_emp_id if govt_emp_id else None, name))
+    VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
+    ''', (phone_number, worker_type, trade_skill, pincode, govt_emp_id if govt_emp_id else None, name))
     conn.commit()
     conn.close()
     return RedirectResponse(url="/", status_code=303)
@@ -210,7 +365,6 @@ async def receive_whatsapp_message(request: Request):
             sender_phone = message_data['from']
             message_type = message_data['type']
             
-            # Restart session safely and update timestamp
             if sender_phone not in user_sessions:
                 user_sessions[sender_phone] = {}
             session = user_sessions[sender_phone]
@@ -220,7 +374,6 @@ async def receive_whatsapp_message(request: Request):
             if message_type == 'text':
                 text_received = message_data['text']['body'].upper().strip()
                 
-                # Main Menu (Case Insensitive + Handles multiple trigger words)
                 if text_received in ["HI", "HELLO", "START", "MENU", "HEY", "JOIN"]:
                     send_main_menu(sender_phone)
                     user_sessions.pop(sender_phone, None) 
@@ -231,17 +384,15 @@ async def receive_whatsapp_message(request: Request):
                     conn = sqlite3.connect('civic_resolve.db')
                     cursor = conn.cursor()
                     
-                    # Verify sender is a Govt Employee
                     cursor.execute("SELECT worker_type FROM workforce WHERE phone_number = ?", (sender_phone,))
                     sender_role = cursor.fetchone()
                     
                     if sender_role and sender_role[0] == 'GOVT':
-                        # Find the Private user with this OTP
                         cursor.execute("SELECT phone_number, otp_expiry FROM workforce WHERE otp = ? AND status = 'PENDING_APPROVAL'", (otp,))
                         target = cursor.fetchone()
                         
                         if target:
-                            if time.time() < target[1]: # Check if 10 mins passed
+                            if time.time() < target[1]: 
                                 cursor.execute("UPDATE workforce SET status = 'ACTIVE', otp = NULL, otp_expiry = NULL WHERE phone_number = ?", (target[0],))
                                 conn.commit()
                                 send_text_message(sender_phone, f"✅ Worker (+{target[0]}) successfully authorized and activated!")
@@ -326,7 +477,6 @@ async def receive_whatsapp_message(request: Request):
                 elif interactive_data['type'] == 'button_reply':
                     selected_id = interactive_data['button_reply']['id']
                     
-                    # Nested Main Menu Logic
                     if selected_id == "BTN_REPORT":
                         user_sessions[sender_phone]["step"] = "category_selection"
                         send_category_menu(sender_phone)
@@ -334,21 +484,19 @@ async def receive_whatsapp_message(request: Request):
                         user_sessions[sender_phone]["step"] = "workforce_type_selection"
                         send_workforce_type_menu(sender_phone)
                         
-                    # Workforce Type Selection
                     elif selected_id == "BTN_TECH":
                         user_sessions[sender_phone] = {"step": "trade_skill_selection", "worker_type": "PRIVATE_TECH"}
                         send_trade_skill_menu(sender_phone)
                     elif selected_id == "BTN_VENDOR":
-                        user_sessions[sender_phone] = {"step": "awaiting_pincode", "worker_type": "VENDOR", "trade_skill": "SUPPLIER"}
+                        user_sessions[sender_phone] = {"step": "awaiting_pincode", "worker_type": "VENDOR", "trade_skill": "MATERIAL_SUPPLIER"}
                         send_text_message(sender_phone, "🏪 Welcome, Supplier! 📍 Reply with your 6-digit Shop Pincode (e.g., 506134).")
                         
-                    # Citizen Property Selection
                     elif selected_id in ["PROP_PUBLIC", "PROP_PRIVATE"]:
                         user_sessions[sender_phone]["property_type"] = "PUBLIC" if selected_id == "PROP_PUBLIC" else "PRIVATE"
                         user_sessions[sender_phone]["step"] = "awaiting_issue_photo"
                         send_text_message(sender_phone, "📸 Please upload a clear photo of the issue.")
 
-                    # TECH CLAIMS TICKET (Concurrency Locked)
+                    # TECH CLAIMS TICKET
                     elif selected_id.startswith("TACK_"):
                         ticket_id = selected_id.split("_")[1]
                         conn = sqlite3.connect('civic_resolve.db')
@@ -356,7 +504,7 @@ async def receive_whatsapp_message(request: Request):
                         cursor.execute("SELECT assigned_worker_phone, latitude, longitude FROM tickets WHERE ticket_id = ?", (ticket_id,))
                         row = cursor.fetchone()
                         
-                        if row and row[0]: # Already assigned
+                        if row and row[0]: 
                             if row[0] == sender_phone:
                                 send_text_message(sender_phone, "⚠️ You have already claimed this job.")
                             else:
@@ -368,7 +516,7 @@ async def receive_whatsapp_message(request: Request):
                             send_text_message(sender_phone, f"✅ Job Claimed!\n\n📍 Google Maps Route: {maps_url}\n\nNeed parts? Text 'NEED [item]'.\nDone? Text 'RESOLVED {ticket_id}'.")
                         conn.close()
 
-                    # VENDOR CLAIMS SUPPLY ORDER (Concurrency Locked)
+                    # VENDOR CLAIMS SUPPLY ORDER
                     elif selected_id.startswith("SACK_"):
                         ticket_id = selected_id.split("_")[1]
                         conn = sqlite3.connect('civic_resolve.db')
@@ -376,7 +524,7 @@ async def receive_whatsapp_message(request: Request):
                         cursor.execute("SELECT vendor_phone, material_requested, assigned_worker_phone FROM tickets WHERE ticket_id = ?", (ticket_id,))
                         row = cursor.fetchone()
                         
-                        if row and row[0]: # Already assigned
+                        if row and row[0]: 
                             send_text_message(sender_phone, "🔒 Sorry, another supplier already accepted this order.")
                         else:
                             cursor.execute("UPDATE tickets SET vendor_phone = ?, material_status = 'ACCEPTED' WHERE ticket_id = ?", (sender_phone, ticket_id))
@@ -410,7 +558,6 @@ async def receive_whatsapp_message(request: Request):
                 if session.get("step") == "awaiting_issue_photo":
                     send_location_request(sender_phone)
                     
-                # Tech uploads the Supply Bill
                 elif session.get("step") == "awaiting_bill_photo":
                     send_text_message(sender_phone, "🧾 Bill securely uploaded for municipal reimbursement! Proceed with the fix and text 'RESOLVED [ID]' when finished.")
                     user_sessions.pop(sender_phone, None)
@@ -421,7 +568,6 @@ async def receive_whatsapp_message(request: Request):
                     trade_skill = session.get("trade_skill", "GENERAL")
                     pincode = session.get("pincode", "000000")
                     
-                    # Generate 6 digit OTP and 10 minute expiry timestamp
                     otp_code = str(random.randint(100000, 999999))
                     expiry_time = time.time() + 600
                     
