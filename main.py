@@ -7,7 +7,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from database import init_db
-from whatsapp_api import send_main_menu, send_workforce_type_menu, send_category_menu, send_property_type_menu, send_text_message, send_location_request, send_trade_skill_menu, send_tech_alert, send_vendor_alert, send_vendor_ready_button
+from whatsapp_api import (
+    send_main_menu, send_workforce_type_menu, send_category_menu, 
+    send_property_type_menu, send_text_message, send_location_request, 
+    send_trade_skill_menu, send_tech_alert, send_vendor_alert, 
+    send_vendor_ready_button
+)
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "sih_civic_resolve_2026")
 user_sessions = {}

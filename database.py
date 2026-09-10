@@ -4,6 +4,7 @@ def init_db():
     conn = sqlite3.connect('civic_resolve.db')
     cursor = conn.cursor()
 
+    # 1. Create tables if they don't exist at all
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS citizens (
         phone_number TEXT PRIMARY KEY,
@@ -41,22 +42,32 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
+    conn.commit()
 
-    # Safely migrate existing databases with new columns (ignores if they already exist)
-    try:
-        cursor.execute("ALTER TABLE tickets ADD COLUMN material_requested TEXT")
-        cursor.execute("ALTER TABLE tickets ADD COLUMN material_status TEXT")
-        cursor.execute("ALTER TABLE tickets ADD COLUMN vendor_phone TEXT")
-    except sqlite3.OperationalError:
-        pass 
+    # 2. THE BULLETPROOF FIX: PRAGMA Schema Migration
+    # This actively checks the tables and forces missing columns to be added safely.
+    def ensure_column(table, column, datatype):
+        cursor.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cursor.fetchall()]
+        if column not in columns:
+            print(f"Injecting missing column: {column} into {table}")
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {datatype}")
+            conn.commit()
 
-    try:
-        cursor.execute("ALTER TABLE workforce ADD COLUMN otp TEXT")
-        cursor.execute("ALTER TABLE workforce ADD COLUMN otp_expiry REAL")
-    except sqlite3.OperationalError:
-        pass 
+    # Update Workforce Table
+    ensure_column("workforce", "govt_emp_id", "TEXT")
+    ensure_column("workforce", "name", "TEXT")
+    ensure_column("workforce", "verification_code", "TEXT")
+    ensure_column("workforce", "approved_by", "TEXT")
+    ensure_column("workforce", "otp", "TEXT")
+    ensure_column("workforce", "otp_expiry", "REAL")
 
-    # Seed Government Employees
+    # Update Tickets Table
+    ensure_column("tickets", "material_requested", "TEXT")
+    ensure_column("tickets", "material_status", "TEXT")
+    ensure_column("tickets", "vendor_phone", "TEXT")
+
+    # 3. Seed Government Employees
     govt_employees = [
         ("25071a6201", "a", "9398750534"),
         ("25071a6202", "b", "6309931174"),
@@ -74,7 +85,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("Database verified securely. OTP & Procurement logic ready.")
+    print("Database verified securely. Schema is up to date!")
 
 if __name__ == "__main__":
     init_db()
